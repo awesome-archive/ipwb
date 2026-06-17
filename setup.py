@@ -3,7 +3,8 @@
 from setuptools import setup
 from ipwb import __version__
 
-long_description = open('README.rst').read()
+with open('README.md') as f:
+    long_description = f.read()
 desc = """InterPlanetary Wayback (ipwb): Web Archive integration with IPFS"""
 
 setup(
@@ -12,22 +13,30 @@ setup(
     url='https://github.com/oduwsdl/ipwb',
     download_url="https://github.com/oduwsdl/ipwb",
     author='Mat Kelly',
-    author_email='mkelly@cs.odu.edu',
+    author_email='me@matkelly.com',
     description=desc,
     packages=['ipwb'],
+    python_requires='>=3.9',
     license='MIT',
     long_description=long_description,
+    long_description_content_type="text/markdown",
     provides=[
         'ipwb'
     ],
     install_requires=[
-        'pywb',
-        'ipfsapi',
-        'flask',
-        'pycrypto'
+        'warcio>=1.5.3',
+        'ipfshttpclient>=0.8.0a',
+        'Flask>=3.0',
+        'pycryptodome>=3.4.11',
+        'requests>=2.19.1',
+        'beautifulsoup4>=4.6.3',
+        'surt>=0.3.0'
     ],
     tests_require=[
-        'pytest'
+        'flake8>=3.4',
+        'pytest>=3.6',
+        'pytest-cov',
+        'pytest-flake8'
     ],
     entry_points="""
         [console_scripts]
@@ -35,20 +44,23 @@ setup(
     """,
     package_data={
         'ipwb': [
-            'serviceWorker.js',
-            'webui/*.*',
-            'webui/favicons/*.*',
-            'samples/indexes/*.*',
-            'samples/warcs/*.*'
+            'assets/*.*',
+            'assets/favicons/*.*',
+            'templates/*.*'
           ]
     },
+    zip_safe=False,
     keywords='http web archives ipfs distributed odu wayback memento',
     classifiers=[
-        'Development Status :: 3 - Alpha',
+        'Development Status :: 4 - Beta',
 
         'Environment :: Web Environment',
 
-        'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
 
         'License :: OSI Approved :: MIT License',
 

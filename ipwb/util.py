@@ -1,114 +1,141 @@
-from __future__ import print_function
-
+import functools
 from os.path import expanduser
-from os.path import basename
 
 import os
-from os import devnull
-import json
-import sys
+
+import ipfshttpclient
 import requests
-import ipfsapi
-import exceptions
-import subprocess
+
 import re
-import site
 # Datetime conversion to rfc1123
 import locale
 import datetime
+import logging
+import platform
 
-import urllib2
+from enum import Enum, auto
+
+from urllib.request import urlopen
+from urllib.error import URLError
+
 import json
-from __init__ import __version__ as ipwbVersion
+from .__init__ import __version__ as ipwb_version
+from . import settings
 
-# from requests.exceptions import ConnectionError
-from ipfsapi.exceptions import ConnectionError
+from ipfshttpclient.exceptions import ConnectionError, AddressError
+from multiaddr.exceptions import StringParseError
+from packaging.version import parse as parse_version
 
+from .exceptions import IPFSDaemonNotAvailable
 
-IPFSAPI_IP = '127.0.0.1'
-IPFSAPI_PORT = 5001
-IPWBREPLAY_IP = 'localhost'  # 127.0.0.1
-IPWBREPLAY_PORT = 5000
-
-INDEX_FILE = 'samples/indexes/sample-encrypted.cdxj'
-SAMPLE_WARC = 'samples/warcs/salam-home.warc'
+logger = logging.getLogger(__name__)
 
 
-def isDaemonAlive(hostAndPort="{0}:{1}".format(IPFSAPI_IP, IPFSAPI_PORT)):
+IPFSAPI_MUTLIADDRESS = '/dns/localhost/tcp/5001/http'
+# or '/dns/{host}/tcp/{port}/http'
+# or '/ip4/{ipaddress}/tcp/{port}/http'
+# or '/ip6/{ipaddress}/tcp/{port}/http
+
+IPWBREPLAY_ADDRESS = 'localhost:2016'
+
+(IPWBREPLAY_HOST, IPWBREPLAY_PORT) = IPWBREPLAY_ADDRESS.split(':')
+IPWBREPLAY_PORT = int(IPWBREPLAY_PORT)
+
+INDEX_FILE = os.path.join('samples', 'indexes', 'salam-home.cdxj')
+
+
+class MementoMatch(Enum):
+    WRONGKEY = auto()
+    RIGHTKEYWRONGDATE = auto()
+    EXACTMATCH = auto()
+
+
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
+
+dt_pattern = re.compile(r"^(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?$")
+
+
+def create_ipfs_client():
+    """Create and return IPFS client."""
+    daemonMultiaddr = settings.App.config("ipfsapi")
+    try:
+        return ipfshttpclient.Client(daemonMultiaddr)
+    except Exception as err:
+        raise Exception('Cannot create an IPFS client.') from err
+
+
+@functools.lru_cache()
+def ipfs_client():
+    """
+    Create and cache IPFS client instance.
+
+    Caching is the single difference between this and
+    `create_ipfs_client()` above.
+    """
+    return create_ipfs_client()
+
+
+def check_daemon_is_alive():
     """Ensure that the IPFS daemon is running via HTTP before proceeding"""
-    client = ipfsapi.Client(IPFSAPI_IP, IPFSAPI_PORT)
+    client = ipfs_client()
+    daemonMultiaddr = settings.App.config("ipfsapi")
 
     try:
-        # OSError if ipfs not installed
-        subprocess.call(['ipfs', '--version'], stdout=open(devnull, 'wb'))
-
         # ConnectionError/AttributeError if IPFS daemon not running
         client.id()
         return True
-    except (ConnectionError, exceptions.AttributeError):
-        logError("Daemon is not running at http://" + hostAndPort)
-        return False
-    except OSError:
-        logError("IPFS is likely not installed. "
-                 "See https://ipfs.io/docs/install/")
-        sys.exit()
-    except:
-        logError('Unknown error in retrieving daemon status')
-        logError(sys.exc_info()[0])
+
+    except ConnectionError as err:
+        raise IPFSDaemonNotAvailable(
+            f'Daemon is not running at: {daemonMultiaddr}',
+        ) from err
+
+    except OSError as err:
+        raise IPFSDaemonNotAvailable(
+            'IPFS is likely not installed. See https://ipfs.io/docs/install/'
+        ) from err
+
+    except Exception as err:
+        raise IPFSDaemonNotAvailable(
+            'Unknown error in retrieving IPFS daemon status.',
+        ) from err
 
 
-def logError(errIn):
-    print(errIn, file=sys.stderr)
-
-
-def isValidCDXJ(stringIn):  # TODO: Check specific strict syntax
+def is_valid_cdxj(stringIn):  # TODO: Check specific strict syntax
     # Also, be sure to mind the meta headers starting with @/#, etc.
     return True
 
 
-def isValidCDXJLine(cdxjLine):
+def is_valid_cdxj_line(cdxj_line):
     try:
-        (surtURI, datetime, jsonData) = cdxjLine.split(' ', 2)
+        (surt_uri, datetime, jsonData) = cdxj_line.split(' ', 2)
 
         json.loads(jsonData)
-        validDatetime = len(datetime) == 14
+        valid_datetime = len(datetime) == 14
 
-        validSURT = True  # TODO: check valid SURT URI
+        valid_surt = True  # TODO: check valid SURT URI
 
-        return validSURT and validDatetime
+        return valid_surt and valid_datetime
     except ValueError:  # Not valid JSON
         return False
     except NameError:
-        metadataRecord = isCDXJMetadataRecord(cdxjLine)
-        return metadataRecord
-    except:
+        return is_cdxj_metadata_record(cdxj_line)
+    except Exception as e:
         return False
-
-
-def sanitizecdxjLine(cdxjLine):
-    return cdxjLine
 
 
 # Compare versions of software, <0 if a<b, 0 if ==, >1 if b>a
-def compareVersions(versionA, versionB):
-    def normalize(v):
-        return [int(x) for x in re.sub(r'(\.0+)*$', '', v).split(".")]
-    return cmp(normalize(versionA), normalize(versionB))
+def compare_versions(versionA, versionB):
+    return parse_version(versionA) < parse_version(versionB)
 
 
-def isCDXJMetadataRecord(cdxjLine):
-    if len(cdxjLine) == 0:
-        return False
-
-    validCDXJMetadataFields = ['!meta', '!context']
-    if '!context' in cdxjLine or '!meta' in cdxjLine:
-        firstField = cdxjLine.split(' ', 1)[0]
-        return firstField in validCDXJMetadataFields
-
-    return False
+def is_cdxj_metadata_record(cdxj_line):
+    return cdxj_line.strip()[:1] == '!'
 
 
-def isLocalHosty(uri):
+def is_localhosty(uri):
     # TODO: check for these SW conditions
     # (*, localhost, *); (*, 127/8, *); (*, ::1/128, *)
     localhosts = ['localhost', '127.0.0.1']
@@ -118,136 +145,208 @@ def isLocalHosty(uri):
     return False
 
 
-def setupIPWBInIPFSConfig():
-    hostPort = getIPWBReplayConfig()
-    if not hostPort:
-        setIPWBReplayConfig(IPWBREPLAY_IP, IPWBREPLAY_PORT)
+def set_locale():
+    currentOS = platform.system()
 
+    if currentOS == 'Darwin':
+        new_locale = 'en_US'
+    elif currentOS == 'Windows':
+        new_locale = 'english'
+    else:  # Assume Linux
+        new_locale = 'en_US.utf8'
 
-def retrieveMemCount():
-    with open(INDEX_FILE, 'r') as cdxjFile:
-        for i, l in enumerate(cdxjFile):
-            pass
-        return i+1
-
-
-def datetimeToRFC1123(digits14):
     try:
-        locale.setlocale(locale.LC_TIME, 'en_US')
-    except locale.Error as e:
-        locale.setlocale(locale.LC_TIME, 'en_US.utf8')
+        locale.setlocale(locale.LC_TIME, new_locale)
+    except locale.Error:
+        locale.setlocale(locale.LC_TIME, '')
+
+
+def digits14_to_rfc1123(digits14):
+    set_locale()
     d = datetime.datetime.strptime(digits14, '%Y%m%d%H%M%S')
     return d.strftime('%a, %d %b %Y %H:%M:%S GMT')
 
 
-def fetchRemoteFile(path):
+def rfc1123_to_digits14(rfc1123_datestring):
+    set_locale()
+    d = datetime.datetime.strptime(rfc1123_datestring,
+                                   '%a, %d %b %Y %H:%M:%S %Z')
+
+    # TODO: Account for conversion if TZ other than GMT not specified
+
+    return d.strftime('%Y%m%d%H%M%S')
+
+
+def iso8601_to_digits14(iso8601DateString):
+    set_locale()
+    d = datetime.datetime.strptime(iso8601DateString,
+                                   "%Y-%m-%dT%H:%M:%SZ")
+
+    # TODO: Account for conversion if TZ other than GMT not specified
+
+    return d.strftime('%Y%m%d%H%M%S')
+
+
+def is_rfc1123_compliant(dtstr):
+    try:
+        datetime.datetime.strptime(dtstr, '%a, %d %b %Y %H:%M:%S GMT')
+        return True
+    except ValueError as err:
+        return False
+
+
+def get_rfc1123_of_now():
+    set_locale()
+    d = datetime.datetime.now()
+    return d.strftime('%a, %d %b %Y %H:%M:%S GMT')
+
+
+def pad_digits14(dtstr, validate=False):
+    '''Pad datetime to make a 14-digit string and optionally validate it'''
+    match = dt_pattern.match(dtstr)
+    if match:
+        Y = match.group(1)
+        m = match.group(2) or '01'
+        d = match.group(3) or '01'
+        H = match.group(4) or '00'
+        M = match.group(5) or '00'
+        S = match.group(6) or '00'
+        dtstr = f'{Y}{m}{d}{H}{M}{S}'
+    if validate:
+        datetime.datetime.strptime(dtstr, '%Y%m%d%H%M%S')
+    return dtstr
+
+
+def fetch_remote_file(path):
     try:
         r = requests.get(path)
         return r.text
+
     except ConnectionError:
-        logError('File at {0} is unavailable.'.format(path))
-    except:
-        logError('An unknown error occurred trying to fetch {0}'.format(path))
-        logError(sys.exc_info()[0])
-    return None
+        raise Exception(f'File at {path} is unavailable.')
+
+    except Exception as err:
+        raise Exception(
+            'An unknown error occurred trying to fetch {}'.format(path)
+        ) from err
 
 
 # IPFS Config manipulation from here on out.
-def readIPFSConfig():
+def read_ipfs_config():
+    ipfs_config_path = os.path.join(expanduser("~"), '.ipfs', 'config')
+    if 'IPFS_PATH' in os.environ:
+        ipfs_config_path = os.path.join(
+            os.environ.get('IPFS_PATH'), 'config')
+
     try:
-        with open(expanduser("~") + '/.ipfs/config', 'r') as f:
+        with open(ipfs_config_path, 'r') as f:
             return json.load(f)
-    except IOError:
-        logError("IPFS config not found.")
-        logError("Have you installed ipfs and run ipfs init?")
-        sys.exit()
+
+    except IOError as err:
+        raise Exception(
+            'IPFS config not found. Have you installed ipfs and run ipfs init?'
+        ) from err
 
 
-def writeIPFSConfig(jsonToWrite):
-    with open(expanduser("~") + '/.ipfs/config', 'w') as f:
-        f.write(json.dumps(jsonToWrite, indent=4, sort_keys=True))
+def write_ipfs_config(json_to_write):
+    ipfs_config_path = os.path.join(expanduser("~"), '.ipfs', 'config')
+    if 'IPFS_PATH' in os.environ:
+        ipfs_config_path = os.path.join(
+            os.environ.get('IPFS_PATH'), 'config')
+
+    with open(ipfs_config_path, 'w') as f:
+        f.write(json.dumps(json_to_write, indent=4, sort_keys=True))
 
 
-def getIPFSAPIHostAndPort(ipfsJSON=None):
-    if not ipfsJSON:
-        ipfsJSON = readIPFSConfig()
+def get_ipfsapi_host_and_port():
+    daemon_address = settings.App.config("ipfsapi")
+    # format right now is "/dns/localhost/tcp/5001/http"
 
-    (scheme, host, protocol, port) = (
-        ipfsJSON['Addresses']['API'][1:].split('/')
-    )
-    return host + ':' + port
-
-
-def getIPFSAPIPort(ipfsJSON=None):
-    if not ipfsJSON:
-        ipfsJSON = readIPFSConfig()
-    ipfsAPIPort = basename(ipfsJSON['Addresses']['API'])
+    (scheme, host, protocol, port, protocol2) = daemon_address[1:].split('/')
+    if protocol2 == "https" and port == "443":
+        # if https is used, rely on a 301/302 redirect response
+        return host
+    else:
+        return host + ':' + port
 
 
-def getIPWBReplayConfig(ipfsJSON=None):
-    if not ipfsJSON:
-        ipfsJSON = readIPFSConfig()
+def get_ipwb_replay_config(ipfs_json=None):
+    if not ipfs_json:
+        ipfs_json = read_ipfs_config()
     port = None
-    if ('Ipwb' in ipfsJSON and 'Replay' in ipfsJSON['Ipwb'] and
-       'Port' in ipfsJSON['Ipwb']['Replay']):
-        host = ipfsJSON['Ipwb']['Replay']['Host']
-        port = ipfsJSON['Ipwb']['Replay']['Port']
+    if ('Ipwb' in ipfs_json and 'Replay' in ipfs_json['Ipwb'] and
+       'Port' in ipfs_json['Ipwb']['Replay']):
+        host = ipfs_json['Ipwb']['Replay']['Host']
+        port = ipfs_json['Ipwb']['Replay']['Port']
         return (host, port)
     else:
         return None
 
 
-def setIPWBReplayConfig(Host, Port, ipfsJSON=None):
-    if not ipfsJSON:
-        ipfsJSON = readIPFSConfig()
-    ipfsJSON['Ipwb'] = {}
-    ipfsJSON['Ipwb']['Replay'] = {
+def set_ipwb_replay_config(Host, Port, ipfs_json=None):
+    if not ipfs_json:
+        ipfs_json = read_ipfs_config()
+    ipfs_json['Ipwb'] = {}
+    ipfs_json['Ipwb']['Replay'] = {
       u'Host': Host,
       u'Port': Port
     }
-    writeIPFSConfig(ipfsJSON)
+    write_ipfs_config(ipfs_json)
 
 
-def setIPWBReplayIndexPath(cdxj):
+def set_ipwb_replay_index_path(cdxj):
     if cdxj is None:
         cdxj = INDEX_FILE
-    ipfsJSON = readIPFSConfig()
-    ipfsJSON['Ipwb']['Replay']['Index'] = cdxj
-    writeIPFSConfig(ipfsJSON)
+    ipfs_json = read_ipfs_config()
+    ipfs_json['Ipwb']['Replay']['Index'] = cdxj
+    write_ipfs_config(ipfs_json)
     return
 
 
-def getIPWBReplayIndexPath():
-    ipfsJSON = readIPFSConfig()
-    if 'Ipwb' not in ipfsJSON:
-        setIPWBReplayConfig(IPWBREPLAY_IP, IPWBREPLAY_PORT)
-        ipfsJSON = readIPFSConfig()
+def get_ipwb_replay_index_path():
+    ipfs_json = read_ipfs_config()
+    if 'Ipwb' not in ipfs_json:
+        set_ipwb_replay_config(IPWBREPLAY_HOST, IPWBREPLAY_PORT)
+        ipfs_json = read_ipfs_config()
 
-    if 'Index' in ipfsJSON['Ipwb']['Replay']:
-        return ipfsJSON['Ipwb']['Replay']['Index']
+    if 'Index' in ipfs_json['Ipwb']['Replay']:
+        return ipfs_json['Ipwb']['Replay']['Index']
     else:
         return ''
 
 
-def runningLatestIPWB():
+# From pywb 2.0.4
+def unsurt(surt):
     try:
-        resp = urllib2.urlopen('https://pypi.python.org/pypi/ipwb/json')
-        jResp = json.loads(resp.read())
-        latestVersion = jResp['info']['version']
-        currentVersion = re.sub(r'\.0+', '.', ipwbVersion)
-        return latestVersion == currentVersion
-    except:
+        index = surt.index(')/')
+        parts = surt[0:index].split(',')
+        parts.reverse()
+        host = '.'.join(parts)
+        host += surt[index+1:]
+        return host
+
+    except ValueError:
+        # May not be a valid surt
+        return surt
+
+
+def get_latest_version():
+    try:
+        resp = urlopen('https://pypi.org/pypi/ipwb/json')
+        return json.loads(resp.read())['info']['version']
+    except Exception:
         return None
 
 
-def firstRun():
-    import indexer
-    if runningLatestIPWB() is False:
-        print('This version of ipwb is outdated.'
-              ' Please run pip install --upgrade ipwb.')
-
-    # Ensure the sample WARC is in IPFS
-    print('Executing first-run procedure on provided sample data.')
-
-    indexer.indexFileAt(os.path.dirname(__file__) + '/' + SAMPLE_WARC,
-                                                    'radon', quiet=True)
+def check_for_update(_):
+    latest = get_latest_version()
+    if not latest:
+        print("Failed to check for the latest version.")
+        return
+    current = re.sub(r'\.0+', '.', ipwb_version)
+    if latest == current:
+        print(f"Installed version {current} is up to date.")
+    else:
+        print("The installed version of ipwb is outdated.")
+        print(f"* Installed: {current}\n* Latest:    {latest}")
+        print("Please run `pip install --upgrade ipwb` to upgrade.")

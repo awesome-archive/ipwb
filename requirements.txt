@@ -1,5 +1,10 @@
-pywb==0.33.2
-ipfsapi>=0.4.2
-Flask==0.12.2
-pycrypto==2.6.1
-pytest>=3.0
+warcio>=1.5.3
+ipfshttpclient>=0.8.0a
+Flask>=3.0
+pycryptodome>=3.4.11
+requests>=2.19.1
+beautifulsoup4>=4.6.3
+surt>=0.3.0
+multiaddr >= 0.0.9
+packaging==23.0
+setuptools==75.2.0
